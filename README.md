@@ -60,15 +60,16 @@ zig build -Doptimize=fast run
 
 Build and run the Keccak-$f[1600]$ benchmark comparing against the Zig standard library only:
 
-```sh
+```bash
 zig build bench-keccak -Doptimize=fast
 ./zig-out/bin/bench-keccak
 ```
 
-It is possible to compare the performance of the implementation against the SIMD Keccak implementation used in the Dilithium [reference code](https://github.com/pq-crystals/dilithium) and the ML-DSA native [code](https://github.com/pq-code-package/mldsa-native). To do that clone the repositories somewhere on your system, e.g., into your home directory on Linux, and then use the `-Ddilithium-avx2-dir` command line flag to point at the AVX2 implementation the Dilithium reference, or `-Dmldsa-native-dir` to point at the ML-DSA native repository root directory. For example, this can look something like this:
+It is possible to compare the performance of the implementation against the SIMD Keccak implementation used in the Dilithium [reference code](https://github.com/pq-crystals/dilithium) and the ML-DSA native [code](https://github.com/pq-code-package/mldsa-native). To do that clone the repositories somewhere on your system, e.g., into your home directory on Linux, and then use the `-Ddilithium-avx2-dir` command line flag to point at the AVX2 implementation the Dilithium reference, or `-Dmldsa-native-dir` to point at the ML-DSA native repository root directory. You can limit the feature set compiled for using `-Dcpu`, for example when you only want an AVX2 implementation even when your machine has AVX-512F, or only NEON when your machine has SVE/SVE2.
 
-```sh
-zig build bench-keccak -Doptimize=fast \
+For example, this can look something like this:
+```bash
+zig build bench-keccak -Dcpu=x86_64+avx2 -Doptimize=fast \
   -Ddilithium-avx2-dir=$HOME/dilithium/avx2 \
   -Dmldsa-native-dir=$HOME/mldsa-native
 ./zig-out/bin/bench-keccak
