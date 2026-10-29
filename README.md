@@ -53,7 +53,7 @@ zig build test
 Run the demo executable:
 
 ```sh
-zig build run
+zig build -Doptimize=fast run
 ```
 
 ## Benchmarking
@@ -61,14 +61,14 @@ zig build run
 Build and run the Keccak-$f[1600]$ benchmark comparing against the Zig standard library only:
 
 ```sh
-zig build bench-keccak -Doptimize=ReleaseFast
+zig build bench-keccak -Doptimize=fast
 ./zig-out/bin/bench-keccak
 ```
 
-To include the external reference implementations from `dilithium/avx2` (`f1600x4.S` on `x86_64`) and `~/mldsa-native` (AVX2 on `x86_64`, NEON/v8.4-A SHA3 assembly on `aarch64`, and portable C on `riscv64`/`riscv32`):
+It is possible to compare the performance of the implementation against the SIMD Keccak implementation used in the Dilithium [reference code](https://github.com/pq-crystals/dilithium) and the ML-DSA native [code](https://github.com/pq-code-package/mldsa-native). To do that clone the repositories somewhere on your system, e.g., into your home directory on Linux, and then use the `-Ddilithium-avx2-dir` command line flag to point at the AVX2 implementation the Dilithium reference, or `-Dmldsa-native-dir` to point at the ML-DSA native repository root directory. For example, this can look something like this:
 
 ```sh
-zig build bench-keccak -Doptimize=ReleaseFast \
+zig build bench-keccak -Doptimize=fast \
   -Ddilithium-avx2-dir=$HOME/dilithium/avx2 \
   -Dmldsa-native-dir=$HOME/mldsa-native
 ./zig-out/bin/bench-keccak
@@ -77,11 +77,24 @@ zig build bench-keccak -Doptimize=ReleaseFast \
 Example output on an AVX2 target (`native_parallelism = 4`):
 
 ```text
-native_parallelism = 4; comparing four-way unroll 1 and 4
-std KeccakF(1600) scalar  :    715.3 cycles/call,   715.3 cycles/instance
-Zig 4-way unroll 1        :   1092.5 cycles/call,   273.1 cycles/instance
-Zig 4-way unroll 4        :   1101.3 cycles/call,   275.3 cycles/instance
-Dilithium f1600x4.S       :   1181.8 cycles/call,   295.4 cycles/instance
-ML-DSA native Keccak x4   :   1163.8 cycles/call,   290.9 cycles/instance
-checksum: 49cc27827092cb2b
+native_parallelism = 4; comparing 1/2/4/8-way and native (4-way) permutations
+std KeccakF(1600) scalar    :    785.5 cycles/call,   785.5 cycles/instance
+Zig 1-way unroll 1          :    772.3 cycles/call,   772.3 cycles/instance
+Zig 1-way unroll 2          :    749.3 cycles/call,   749.3 cycles/instance
+Zig 1-way unroll 4          :    722.8 cycles/call,   722.8 cycles/instance
+Zig 2-way unroll 1          :   1019.3 cycles/call,   509.6 cycles/instance
+Zig 2-way unroll 2          :   1034.5 cycles/call,   517.3 cycles/instance
+Zig 2-way unroll 4          :   1039.8 cycles/call,   519.9 cycles/instance
+Zig 4-way unroll 1          :   1031.8 cycles/call,   257.9 cycles/instance
+Zig 4-way unroll 2          :   1041.8 cycles/call,   260.4 cycles/instance
+Zig 4-way unroll 4          :   1037.8 cycles/call,   259.4 cycles/instance
+Zig 8-way unroll 1          :   2078.0 cycles/call,   259.8 cycles/instance
+Zig 8-way unroll 2          :   2020.5 cycles/call,   252.6 cycles/instance
+Zig 8-way unroll 4          :   2052.8 cycles/call,   256.6 cycles/instance
+Zig native (4-way) unroll 1 :   1024.5 cycles/call,   256.1 cycles/instance
+Zig native (4-way) unroll 2 :   1042.3 cycles/call,   260.6 cycles/instance
+Zig native (4-way) unroll 4 :   1038.5 cycles/call,   259.6 cycles/instance
+Dilithium f1600x4.S         :   1117.3 cycles/call,   279.3 cycles/instance
+ML-DSA native Keccak x4     :   1099.3 cycles/call,   274.8 cycles/instance
+checksum: b2bca34734155bf6
 ```

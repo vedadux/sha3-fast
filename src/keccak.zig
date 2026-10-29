@@ -379,6 +379,7 @@ test "KeccakF1600 matches std Keccak-f[1600]" {
     try testPermutationAgainstStd(native_parallelism, 1);
     inline for (.{ 2, 3, 4, 5, 6, 8, 12, 24 }) |unroll| {
         try testPermutationAgainstStd(4, unroll);
+        try testPermutationAgainstStd(native_parallelism, unroll);
     }
 }
 
@@ -389,8 +390,15 @@ test "KeccakF1600 zero-state known answer" {
     try testing.expectEqual(@as(u64, 0xEAF1FF7B5CECA249), st.st[24][1]);
 }
 
-fn testShakeAgainstStd(comptime n: u16, comptime len: usize, comptime blocks: usize) !void {
-    var prng = std.Random.DefaultPrng.init(len * 31 + n);
+fn testShakeAgainstStd(
+    comptime ParShake: fn (comptime u16) type,
+    comptime StdShake: type,
+    comptime n: u16,
+    comptime len: usize,
+    comptime out_len: usize,
+) !void {
+    const S = ParShake(n);
+    var prng = std.Random.DefaultPrng.init(len * 31 + out_len * 13 + n);
     const random = prng.random();
 
     var msgs: [n][len]u8 = undefined;
@@ -399,47 +407,38 @@ fn testShakeAgainstStd(comptime n: u16, comptime len: usize, comptime blocks: us
         random.bytes(m);
         p.* = m;
     }
-    var out: [n][blocks * 168]u8 = undefined;
-    var out_ptrs: [n]*[blocks * 168]u8 = undefined;
+    var out: [n][out_len]u8 = undefined;
+    var out_ptrs: [n]*[out_len]u8 = undefined;
     for (&out_ptrs, &out) |*p, *o| p.* = o;
 
-    var sponge = Shake128(n).init(len, msg_ptrs);
-    sponge.squeezeBlocks(blocks, out_ptrs);
+    S.hash(len, msg_ptrs, out_len, out_ptrs);
 
     for (msgs, out) |m, o| {
-        var expected: [blocks * 168]u8 = undefined;
-        std.crypto.hash.sha3.Shake128.hash(&m, &expected, .{});
+        var expected: [out_len]u8 = undefined;
+        StdShake.hash(&m, &expected, .{});
         try testing.expectEqualSlices(u8, &expected, &o);
     }
 }
 
 test "parallel SHAKE128 matches std" {
-    try testShakeAgainstStd(4, 34, 5);
-    try testShakeAgainstStd(native_parallelism, 34, 5);
-    try testShakeAgainstStd(3, 0, 1);
-    try testShakeAgainstStd(2, 167, 2);
-    try testShakeAgainstStd(2, 168, 2);
-    try testShakeAgainstStd(8, 400, 3);
+    const rate = Shake128(1).block_bytes;
+    inline for (.{ 1, 2, 3, 4, 8, native_parallelism }) |n| {
+        inline for (.{ 0, 1, 34, rate - 1, rate, rate + 1, 400 }) |len| {
+            inline for (.{ 32, rate, 2 * rate, 2 * rate + 29 }) |out_len| {
+                try testShakeAgainstStd(Shake128, std.crypto.hash.sha3.Shake128, n, len, out_len);
+            }
+        }
+    }
 }
 
 test "parallel SHAKE256 matches std" {
-    const n = 4;
-    var msgs: [n][66]u8 = undefined;
-    var msg_ptrs: [n]*const [66]u8 = undefined;
-    for (&msgs, &msg_ptrs, 0..) |*m, *p, k| {
-        for (m, 0..) |*b, i| b.* = @truncate(i * 7 + k);
-        p.* = m;
-    }
-    var out: [n][2 * 136]u8 = undefined;
-    var out_ptrs: [n]*[2 * 136]u8 = undefined;
-    for (&out_ptrs, &out) |*p, *o| p.* = o;
-
-    var sponge = Shake256(n).init(66, msg_ptrs);
-    sponge.squeezeBlocks(2, out_ptrs);
-    for (msgs, out) |m, o| {
-        var expected: [2 * 136]u8 = undefined;
-        std.crypto.hash.sha3.Shake256.hash(&m, &expected, .{});
-        try testing.expectEqualSlices(u8, &expected, &o);
+    const rate = Shake256(1).block_bytes;
+    inline for (.{ 1, 2, 3, 4, 8, native_parallelism }) |n| {
+        inline for (.{ 0, 1, 66, rate - 1, rate, rate + 1, 300 }) |len| {
+            inline for (.{ 32, rate, 2 * rate, 2 * rate + 29 }) |out_len| {
+                try testShakeAgainstStd(Shake256, std.crypto.hash.sha3.Shake256, n, len, out_len);
+            }
+        }
     }
 }
 

@@ -53,9 +53,9 @@ const round_constants = [24]u64{
     0x8000000080008081, 0x8000000000008080, 0x0000000080000001, 0x8000000080008008,
 };
 
-/// 25 word positions, each containing four 64-bit instances.
-const Buffer = [4][25]u64;
-const Operation = *const fn (*align(32) Buffer) void;
+const max_instances: usize = @max(8, keccak.native_parallelism);
+const Buffer = [max_instances][25]u64;
+const Operation = *const fn (*align(64) Buffer) void;
 
 const Case = struct {
     name: []const u8,
@@ -64,38 +64,41 @@ const Case = struct {
     sequential: bool = false,
 };
 
-fn toSequential(input: *const Buffer) Buffer {
-    const source: *const [100]u64 = @ptrCast(input);
-    var result: Buffer = undefined;
-    const dest: *[100]u64 = @ptrCast(&result);
-    for (0..4) |way| {
-        for (0..25) |lane| dest[way * 25 + lane] = source[lane * 4 + way];
+/// Convert from sequential `[instances][25]u64` layout to word-sliced `[25][instances]u64` layout
+/// for the first `instances` instances.
+fn toSliced(input: *const Buffer, instances: usize) Buffer {
+    var result: Buffer = @splat(@splat(0));
+    const dest: *[max_instances * 25]u64 = @ptrCast(&result);
+    for (0..25) |word| {
+        for (0..instances) |way| {
+            dest[word * instances + way] = input[way][word];
+        }
     }
     return result;
 }
 
-fn zigUnrolled(comptime unroll: u5) Operation {
+fn zigUnrolled(comptime n: u16, comptime unroll: u5) Operation {
     return struct {
-        fn call(buf: *align(32) Buffer) void {
-            const F = keccak.KeccakF1600Unrolled(4, unroll);
+        fn call(buf: *align(64) Buffer) void {
+            const F = keccak.KeccakF1600Unrolled(n, unroll);
             const st: *F = @ptrCast(buf);
             for (0..permutations_per_sample) |_| st.permute();
         }
     }.call;
 }
 
-fn stdScalar(buf: *align(32) Buffer) void {
+fn stdScalar(buf: *align(64) Buffer) void {
     const F = std.crypto.core.keccak.KeccakF(1600);
-    const st: *F = @ptrCast(buf);
+    const st: *F = @ptrCast(&buf[0]);
     for (0..permutations_per_sample) |_| st.permute();
 }
 
-fn dilithiumX4(buf: *align(32) Buffer) void {
+fn dilithiumX4(buf: *align(64) Buffer) void {
     const st: *align(32) [25]@Vector(4, u64) = @ptrCast(buf);
     for (0..permutations_per_sample) |_| pqcrystals_dilithium_fips202x4_avx2_f1600x4(st, &round_constants);
 }
 
-fn nativeX1(buf: *align(32) Buffer) void {
+fn nativeX1(buf: *align(64) Buffer) void {
     const st: *[25]u64 = @ptrCast(&buf[0]);
     for (0..permutations_per_sample) |_| {
         switch (comptime builtin.target.cpu.arch) {
@@ -117,7 +120,7 @@ fn nativeX1(buf: *align(32) Buffer) void {
     }
 }
 
-fn nativeX4(buf: *align(32) Buffer) void {
+fn nativeX4(buf: *align(64) Buffer) void {
     const st: *align(32) [100]u64 = @ptrCast(buf);
     for (0..permutations_per_sample) |_| {
         switch (comptime builtin.target.cpu.arch) {
@@ -155,34 +158,24 @@ fn nativeX4(buf: *align(32) Buffer) void {
 }
 
 fn validate(cases: []const Case) !void {
-    var input: Buffer align(32) = undefined;
+    var input_seq: Buffer align(64) = undefined;
     var ascon = std.Random.Ascon.init(@splat(1));
-    ascon.random().bytes(std.mem.asBytes(&input));
+    ascon.random().bytes(std.mem.asBytes(&input_seq));
 
-    const in_flat: *const [4 * 25]u64 = @ptrCast(&input);
-    var expected: Buffer align(32) = undefined;
-    for (0..4) |k| {
-        var scalar: Buffer align(32) = undefined;
-        for (0..25) |i| scalar[0][i] = in_flat[i * 4 + k];
+    var expected_seq: Buffer align(64) = undefined;
+    for (0..max_instances) |k| {
+        var scalar: Buffer align(64) = @splat(@splat(0));
+        scalar[0] = input_seq[k];
         stdScalar(&scalar);
-        const flat: *[4 * 25]u64 = @ptrCast(&expected);
-        for (0..25) |i| flat[i * 4 + k] = scalar[0][i];
+        expected_seq[k] = scalar[0];
     }
-    const expected_sequential = toSequential(&expected);
 
     for (cases) |case| {
-        var actual: Buffer align(32) = if (case.sequential) toSequential(&input) else input;
+        var actual: Buffer align(64) = if (case.sequential) input_seq else toSliced(&input_seq, case.instances);
         case.op(&actual);
-        if (case.instances == 1) {
-            if (!std.mem.eql(u8, std.mem.asBytes(&expected_sequential[0]), std.mem.asBytes(&actual[0]))) {
-                std.log.err("{s}: Keccak mismatch", .{case.name});
-                return error.KeccakMismatch;
-            }
-            continue;
-        }
-        if (case.instances != 4) continue;
-        const reference = if (case.sequential) &expected_sequential else &expected;
-        if (!std.mem.eql(u8, std.mem.asBytes(reference), std.mem.asBytes(&actual))) {
+        const reference: Buffer = if (case.sequential) expected_seq else toSliced(&expected_seq, case.instances);
+        const byte_len = case.instances * 25 * @sizeOf(u64);
+        if (!std.mem.eql(u8, std.mem.asBytes(&reference)[0..byte_len], std.mem.asBytes(&actual)[0..byte_len])) {
             std.log.err("{s}: Keccak mismatch", .{case.name});
             return error.KeccakMismatch;
         }
@@ -233,7 +226,7 @@ inline fn fence() void {
     }
 }
 
-fn measure(op: Operation, buf: *align(32) Buffer) u64 {
+fn measure(op: Operation, buf: *align(64) Buffer) u64 {
     fence();
     const start = cycles();
     fence();
@@ -245,9 +238,35 @@ fn measure(op: Operation, buf: *align(32) Buffer) u64 {
 }
 
 pub fn main(init: std.process.Init) !void {
+    const nat = keccak.native_parallelism;
     const variants = [_]Case{
-        .{ .name = "Zig 4-way unroll 1", .instances = 4, .op = zigUnrolled(1) },
-        .{ .name = "Zig 4-way unroll 4", .instances = 4, .op = zigUnrolled(4) },
+        .{ .name = "Zig 1-way unroll 1", .instances = 1, .op = zigUnrolled(1, 1) },
+        .{ .name = "Zig 1-way unroll 2", .instances = 1, .op = zigUnrolled(1, 2) },
+        .{ .name = "Zig 1-way unroll 4", .instances = 1, .op = zigUnrolled(1, 4) },
+        .{ .name = "Zig 2-way unroll 1", .instances = 2, .op = zigUnrolled(2, 1) },
+        .{ .name = "Zig 2-way unroll 2", .instances = 2, .op = zigUnrolled(2, 2) },
+        .{ .name = "Zig 2-way unroll 4", .instances = 2, .op = zigUnrolled(2, 4) },
+        .{ .name = "Zig 4-way unroll 1", .instances = 4, .op = zigUnrolled(4, 1) },
+        .{ .name = "Zig 4-way unroll 2", .instances = 4, .op = zigUnrolled(4, 2) },
+        .{ .name = "Zig 4-way unroll 4", .instances = 4, .op = zigUnrolled(4, 4) },
+        .{ .name = "Zig 8-way unroll 1", .instances = 8, .op = zigUnrolled(8, 1) },
+        .{ .name = "Zig 8-way unroll 2", .instances = 8, .op = zigUnrolled(8, 2) },
+        .{ .name = "Zig 8-way unroll 4", .instances = 8, .op = zigUnrolled(8, 4) },
+        .{
+            .name = std.fmt.comptimePrint("Zig native ({d}-way) unroll 1", .{nat}),
+            .instances = nat,
+            .op = zigUnrolled(nat, 1),
+        },
+        .{
+            .name = std.fmt.comptimePrint("Zig native ({d}-way) unroll 2", .{nat}),
+            .instances = nat,
+            .op = zigUnrolled(nat, 2),
+        },
+        .{
+            .name = std.fmt.comptimePrint("Zig native ({d}-way) unroll 4", .{nat}),
+            .instances = nat,
+            .op = zigUnrolled(nat, 4),
+        },
     };
     const dilithium_cases = if (bench_options.dilithium_avx2 and is_x86_64) [_]Case{
         .{ .name = "Dilithium f1600x4.S", .instances = 4, .op = dilithiumX4 },
@@ -277,16 +296,16 @@ pub fn main(init: std.process.Init) !void {
     }
     if (!bench_options.mldsa_native)
         std.debug.print("ML-DSA native reference disabled; pass -Dmldsa-native-dir=<path> to include it.\n", .{});
-    std.debug.print("native_parallelism = {d}; comparing four-way unroll 1 and 4\n", .{keccak.native_parallelism});
+    std.debug.print("native_parallelism = {d}; comparing 1/2/4/8-way and native ({d}-way) permutations\n", .{ nat, nat });
 
     try validate(&cases);
 
-    var buf: [cases.len]Buffer align(32) = undefined;
-    var seed: Buffer align(32) = undefined;
+    var buf: [cases.len]Buffer align(64) = undefined;
+    var seed: Buffer align(64) = undefined;
     var ascon = std.Random.Ascon.init(@splat(0));
     ascon.random().bytes(std.mem.asBytes(&seed));
     for (cases, &buf) |case, *state| {
-        state.* = if (case.sequential) toSequential(&seed) else seed;
+        state.* = if (case.sequential) seed else toSliced(&seed, case.instances);
         case.op(state);
     }
 
@@ -303,13 +322,13 @@ pub fn main(init: std.process.Init) !void {
         const median_cycles = times.*[samples / 2];
         const median: f64 = @floatFromInt(median_cycles);
         const per_call = median / permutations_per_sample;
-        std.debug.print("{s:<26}: {d:>8.1} cycles/call, {d:>7.1} cycles/instance\n", .{
+        std.debug.print("{s:<28}: {d:>8.1} cycles/call, {d:>7.1} cycles/instance\n", .{
             case.name,
             per_call,
             per_call / @as(f64, @floatFromInt(case.instances)),
         });
     }
     var checksum: u64 = 0;
-    for (&buf) |*state| checksum ^= state[0][0];
+    for (&buf, 0..) |*state, i| checksum ^= std.math.rotl(u64, state[0][0], i);
     std.debug.print("checksum: {x}\n", .{checksum});
 }
