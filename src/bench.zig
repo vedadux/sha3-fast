@@ -7,6 +7,7 @@ const samples = 0x4001;
 const permutations_per_sample = 8;
 const is_x86_64 = builtin.target.cpu.arch == .x86_64;
 const is_aarch64 = builtin.target.cpu.arch == .aarch64;
+const has_avx512f = is_x86_64 and std.Target.x86.featureSetHas(builtin.target.cpu.features, .avx512f);
 const has_arm_sha3 = is_aarch64 and std.Target.aarch64.featureSetHas(builtin.target.cpu.features, .sha3);
 
 extern fn pqcrystals_dilithium_fips202x4_avx2_f1600x4(state: *align(32) [25]@Vector(4, u64), rc: *const [24]u64) callconv(.c) void;
@@ -44,6 +45,21 @@ extern fn PQCP_MLDSA_NATIVE_MLDSA44_keccak_f1600_x4_v8a_v84a_scalar_hybrid_aarch
 extern fn PQCP_MLDSA_NATIVE_MLDSA44_keccakf1600_permute(state: *[25]u64) callconv(.c) void;
 extern fn PQCP_MLDSA_NATIVE_MLDSA44_keccakf1600x4_permute(state: *align(32) [100]u64) callconv(.c) void;
 
+extern fn KeccakP1600_AVX2_OverwriteBytes(state: *anyopaque, data: [*]const u8, offset: c_uint, length: c_uint) callconv(.c) void;
+extern fn KeccakP1600_AVX2_ExtractBytes(state: *const anyopaque, data: [*]u8, offset: c_uint, length: c_uint) callconv(.c) void;
+extern fn KeccakP1600_AVX2_Permute_24rounds(state: *anyopaque) callconv(.c) void;
+extern fn KeccakP1600times2_SSSE3_PermuteAll_24rounds(states: *anyopaque) callconv(.c) void;
+extern fn KeccakP1600times4_AVX2_PermuteAll_24rounds(states: *anyopaque) callconv(.c) void;
+extern fn KeccakP1600_AVX512_Permute_24rounds(state: *anyopaque) callconv(.c) void;
+extern fn KeccakP1600times2_AVX512_PermuteAll_24rounds(states: *anyopaque) callconv(.c) void;
+extern fn KeccakP1600times4_AVX512_PermuteAll_24rounds(states: *anyopaque) callconv(.c) void;
+extern fn KeccakP1600times8_AVX512_PermuteAll_24rounds(states: *anyopaque) callconv(.c) void;
+
+extern fn KeccakP1600_plain64_Permute_24rounds(state: *anyopaque) callconv(.c) void;
+extern fn KeccakP1600_v84a_Permute_24rounds(state: *anyopaque) callconv(.c) void;
+extern fn KeccakP1600times2_PermuteAll_24rounds(states: *anyopaque) callconv(.c) void;
+extern fn KeccakP1600times4_PermuteAll_24rounds(states: *anyopaque) callconv(.c) void;
+
 const round_constants = [24]u64{
     0x0000000000000001, 0x0000000000008082, 0x800000000000808a, 0x8000000080008000,
     0x000000000000808b, 0x0000000080000001, 0x8000000080008081, 0x8000000000008009,
@@ -62,6 +78,7 @@ const Case = struct {
     instances: usize,
     op: Operation,
     sequential: bool = false,
+    xkcp_avx2_1way: bool = false,
 };
 
 /// Convert from sequential `[instances][25]u64` layout to word-sliced `[25][instances]u64` layout
@@ -157,6 +174,61 @@ fn nativeX4(buf: *align(64) Buffer) void {
     }
 }
 
+fn xkcpAvx2X1(buf: *align(64) Buffer) void {
+    for (0..permutations_per_sample) |_| KeccakP1600_AVX2_Permute_24rounds(&buf[0]);
+}
+
+fn xkcpSsse3X2(buf: *align(64) Buffer) void {
+    for (0..permutations_per_sample) |_| KeccakP1600times2_SSSE3_PermuteAll_24rounds(buf);
+}
+
+fn xkcpAvx2X4(buf: *align(64) Buffer) void {
+    for (0..permutations_per_sample) |_| KeccakP1600times4_AVX2_PermuteAll_24rounds(buf);
+}
+
+fn xkcpAvx512X1(buf: *align(64) Buffer) void {
+    for (0..permutations_per_sample) |_| KeccakP1600_AVX512_Permute_24rounds(&buf[0]);
+}
+
+fn xkcpAvx512X2(buf: *align(64) Buffer) void {
+    for (0..permutations_per_sample) |_| KeccakP1600times2_AVX512_PermuteAll_24rounds(buf);
+}
+
+fn xkcpAvx512X4(buf: *align(64) Buffer) void {
+    for (0..permutations_per_sample) |_| KeccakP1600times4_AVX512_PermuteAll_24rounds(buf);
+}
+
+fn xkcpAvx512X8(buf: *align(64) Buffer) void {
+    for (0..permutations_per_sample) |_| KeccakP1600times8_AVX512_PermuteAll_24rounds(buf);
+}
+
+fn xkcpPlain64X1(buf: *align(64) Buffer) void {
+    for (0..permutations_per_sample) |_| KeccakP1600_plain64_Permute_24rounds(&buf[0]);
+}
+
+fn xkcpArmv84aSha3X1(buf: *align(64) Buffer) void {
+    for (0..permutations_per_sample) |_| KeccakP1600_v84a_Permute_24rounds(&buf[0]);
+}
+
+fn xkcpArmv8aX2(buf: *align(64) Buffer) void {
+    for (0..permutations_per_sample) |_| KeccakP1600times2_PermuteAll_24rounds(buf);
+}
+
+fn xkcpArmv8aX4(buf: *align(64) Buffer) void {
+    for (0..permutations_per_sample) |_| KeccakP1600times4_PermuteAll_24rounds(buf);
+}
+
+fn prepareState(case: Case, input_seq: *const Buffer) Buffer {
+    if (comptime is_x86_64 and bench_options.xkcp) {
+        if (case.xkcp_avx2_1way) {
+            var state: Buffer = @splat(@splat(0));
+            KeccakP1600_AVX2_OverwriteBytes(&state[0], @ptrCast(&input_seq[0]), 0, 200);
+            return state;
+        }
+    }
+    return if (case.sequential) input_seq.* else toSliced(input_seq, case.instances);
+}
+
 fn validate(cases: []const Case) !void {
     var input_seq: Buffer align(64) = undefined;
     var ascon = std.Random.Ascon.init(@splat(1));
@@ -171,8 +243,19 @@ fn validate(cases: []const Case) !void {
     }
 
     for (cases) |case| {
-        var actual: Buffer align(64) = if (case.sequential) input_seq else toSliced(&input_seq, case.instances);
+        var actual: Buffer align(64) = prepareState(case, &input_seq);
         case.op(&actual);
+        if (comptime is_x86_64 and bench_options.xkcp) {
+            if (case.xkcp_avx2_1way) {
+                var extracted: [200]u8 = undefined;
+                KeccakP1600_AVX2_ExtractBytes(&actual[0], &extracted, 0, 200);
+                if (!std.mem.eql(u8, std.mem.asBytes(&expected_seq[0]), &extracted)) {
+                    std.log.err("{s}: Keccak mismatch", .{case.name});
+                    return error.KeccakMismatch;
+                }
+                continue;
+            }
+        }
         const reference: Buffer = if (case.sequential) expected_seq else toSliced(&expected_seq, case.instances);
         const byte_len = case.instances * 25 * @sizeOf(u64);
         if (!std.mem.eql(u8, std.mem.asBytes(&reference)[0..byte_len], std.mem.asBytes(&actual)[0..byte_len])) {
@@ -268,7 +351,7 @@ pub fn main(init: std.process.Init) !void {
             .op = zigUnrolled(nat, 4),
         },
     };
-    const dilithium_cases = if (bench_options.dilithium_avx2 and is_x86_64) [_]Case{
+    const dilithium_cases = if (bench_options.dilithium and is_x86_64) [_]Case{
         .{ .name = "Dilithium f1600x4.S", .instances = 4, .op = dilithiumX4 },
     } else [_]Case{};
     const native_cases = if (bench_options.mldsa_native) switch (comptime builtin.target.cpu.arch) {
@@ -285,17 +368,43 @@ pub fn main(init: std.process.Init) !void {
         },
     } else [_]Case{};
 
+    const xkcp_cases = if (bench_options.xkcp) switch (comptime builtin.target.cpu.arch) {
+        .x86_64 => [_]Case{
+            .{ .name = "XKCP AVX2 x1", .instances = 1, .op = xkcpAvx2X1, .sequential = true, .xkcp_avx2_1way = true },
+            .{ .name = "XKCP SIMD128 (SSSE3) x2", .instances = 2, .op = xkcpSsse3X2 },
+            .{ .name = "XKCP AVX2 x4", .instances = 4, .op = xkcpAvx2X4 },
+        } ++ (if (has_avx512f) [_]Case{
+            .{ .name = "XKCP AVX512 x1", .instances = 1, .op = xkcpAvx512X1, .sequential = true },
+            .{ .name = "XKCP AVX512 x2", .instances = 2, .op = xkcpAvx512X2 },
+            .{ .name = "XKCP AVX512 x4", .instances = 4, .op = xkcpAvx512X4 },
+            .{ .name = "XKCP AVX512 x8", .instances = 8, .op = xkcpAvx512X8 },
+        } else [_]Case{}),
+        .aarch64 => [_]Case{
+            .{ .name = "XKCP plain64 x1", .instances = 1, .op = xkcpPlain64X1, .sequential = true },
+        } ++ (if (has_arm_sha3) [_]Case{
+            .{ .name = "XKCP ARMv8.4A SHA3 x1", .instances = 1, .op = xkcpArmv84aSha3X1, .sequential = true },
+        } else [_]Case{}) ++ [_]Case{
+            .{ .name = if (has_arm_sha3) "XKCP ARMv8.4A SHA3 x2" else "XKCP ARMv8A NEON x2", .instances = 2, .op = xkcpArmv8aX2 },
+            .{ .name = if (has_arm_sha3) "XKCP ARMv8.4A SHA3 x4" else "XKCP ARMv8A NEON x4", .instances = 4, .op = xkcpArmv8aX4, .sequential = true },
+        },
+        else => [_]Case{
+            .{ .name = "XKCP plain64 x1", .instances = 1, .op = xkcpPlain64X1, .sequential = true },
+        },
+    } else [_]Case{};
+
     const cases = [_]Case{
         .{ .name = "std KeccakF(1600) scalar", .instances = 1, .op = stdScalar, .sequential = true },
-    } ++ variants ++ dilithium_cases ++ native_cases;
+    } ++ variants ++ dilithium_cases ++ native_cases ++ xkcp_cases;
 
-    if (!bench_options.dilithium_avx2) {
-        std.debug.print("Dilithium AVX2 reference disabled; pass -Ddilithium-avx2-dir=<path> to include it.\n", .{});
+    if (!bench_options.dilithium) {
+        std.debug.print("Dilithium AVX2 reference disabled; pass -Ddilithium-dir=<path> to include it.\n", .{});
     } else if (!is_x86_64) {
         std.debug.print("Dilithium AVX2 reference skipped on {s} (x86_64 only).\n", .{@tagName(builtin.target.cpu.arch)});
     }
     if (!bench_options.mldsa_native)
         std.debug.print("ML-DSA native reference disabled; pass -Dmldsa-native-dir=<path> to include it.\n", .{});
+    if (!bench_options.xkcp)
+        std.debug.print("XKCP reference disabled; pass -Dxkcp-dir=<path> to include it.\n", .{});
     std.debug.print("native_parallelism = {d}; comparing 1/2/4/8-way and native ({d}-way) permutations\n", .{ nat, nat });
 
     try validate(&cases);
@@ -305,7 +414,7 @@ pub fn main(init: std.process.Init) !void {
     var ascon = std.Random.Ascon.init(@splat(0));
     ascon.random().bytes(std.mem.asBytes(&seed));
     for (cases, &buf) |case, *state| {
-        state.* = if (case.sequential) seed else toSliced(&seed, case.instances);
+        state.* = prepareState(case, &seed);
         case.op(state);
     }
 
